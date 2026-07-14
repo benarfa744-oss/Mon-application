@@ -113,3 +113,4 @@ def generer_pdf_facture(facture: dict, nom_etablissement="Swanky Apartments") ->
         pdf.multi_cell(0, 6, f"Notes : {facture['notes']}")
 
     return bytes(pdf.output())
+    
