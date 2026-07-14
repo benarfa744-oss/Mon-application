@@ -90,6 +90,18 @@ def init_db():
             )
         """)
 
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS utilisateurs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                salt TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'reception',
+                actif INTEGER NOT NULL DEFAULT 1,
+                date_creation TEXT NOT NULL
+            )
+        """)
+
         # Seed des chambres uniquement si la table est vide
         cur = conn.execute("SELECT COUNT(*) AS n FROM chambres")
         if cur.fetchone()["n"] == 0:
@@ -146,9 +158,11 @@ def generer_numero_facture():
 
 def creer_facture(chambre_nom, chambre_type, client, nuitees, tarif_unitaire,
                    taux_tva, statut_paiement="Payé", mode_paiement="Espèces", notes=""):
-    montant_ht = int(round(tarif_unitaire * nuitees))
-    montant_tva = int(round(montant_ht * taux_tva / 100))
-    montant_ttc = montant_ht + montant_tva
+    # Le tarif appliqué est le prix TTC affiché/payé par nuitée (pratique hôtelière
+    # standard : le client voit et paie ce montant, la TVA en est extraite ensuite).
+    montant_ttc = int(round(tarif_unitaire * nuitees))
+    montant_ht = int(round(montant_ttc / (1 + taux_tva / 100)))
+    montant_tva = montant_ttc - montant_ht
     numero = generer_numero_facture()
     date_creation = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -213,3 +227,68 @@ def set_parametre(cle, valeur):
             "ON CONFLICT(cle) DO UPDATE SET valeur = excluded.valeur",
             (cle, str(valeur))
         )
+
+
+# ---------- UTILISATEURS (authentification) ----------
+
+def compter_utilisateurs():
+    with get_connection() as conn:
+        return conn.execute("SELECT COUNT(*) AS n FROM utilisateurs").fetchone()["n"]
+
+
+def username_existe(username):
+    with get_connection() as conn:
+        row = conn.execute("SELECT 1 FROM utilisateurs WHERE username = ?", (username.strip(),)).fetchone()
+        return row is not None
+
+
+def creer_utilisateur(username, password, role="reception"):
+    """Crée un compte utilisateur. Le mot de passe est haché avant stockage."""
+    from auth import hash_password
+    pwd_hash, salt = hash_password(password)
+    date_creation = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO utilisateurs (username, password_hash, salt, role, actif, date_creation) "
+            "VALUES (?, ?, ?, ?, 1, ?)",
+            (username.strip(), pwd_hash, salt, role, date_creation)
+        )
+
+
+def verifier_identifiants(username, password):
+    """Retourne le dict utilisateur si les identifiants sont valides et le compte actif, sinon None."""
+    from auth import verify_password
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM utilisateurs WHERE username = ? AND actif = 1",
+            (username.strip(),)
+        ).fetchone()
+    if row is None:
+        return None
+    if verify_password(password, row["salt"], row["password_hash"]):
+        return dict(row)
+    return None
+
+
+def lister_utilisateurs():
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT id, username, role, actif, date_creation FROM utilisateurs ORDER BY username"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def set_actif_utilisateur(username, actif):
+    with get_connection() as conn:
+        conn.execute("UPDATE utilisateurs SET actif = ? WHERE username = ?", (1 if actif else 0, username))
+
+
+def changer_mot_de_passe(username, nouveau_password):
+    from auth import hash_password
+    pwd_hash, salt = hash_password(nouveau_password)
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE utilisateurs SET password_hash = ?, salt = ? WHERE username = ?",
+            (pwd_hash, salt, username)
+)
+        
