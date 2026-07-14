@@ -11,22 +11,131 @@ st.set_page_config(page_title="Swanky Apartments - PMS", layout="wide", page_ico
 # --- INITIALISATION DE LA BASE DE DONNÉES (persistante entre les sessions) ---
 db.init_db()
 
-NOM_ETABLISSEMENT = db.get_parametre("nom_etablissement", "Swanky Apartments")
-TAUX_TVA = float(db.get_parametre("taux_tva", db.TAUX_TVA_DEFAUT))
-
 
 def fmt_fcfa(valeur):
     return f"{valeur:,.0f}".replace(",", " ") + " FCFA"
 
 
+# ==========================================
+# AUTHENTIFICATION — accès protégé par compte
+# ==========================================
+if "auth_user" not in st.session_state:
+    st.session_state.auth_user = None
+
+
+def afficher_ecran_premiere_configuration():
+    st.title("🏨 Swanky Apartments — PMS")
+    st.subheader("🔐 Configuration initiale")
+    st.info("Aucun compte n'existe encore sur cette installation. "
+             "Crée le premier compte — il sera administrateur et pourra ensuite "
+             "créer les comptes des autres membres de l'équipe.")
+    with st.form("form_setup_admin"):
+        username = st.text_input("Nom d'utilisateur")
+        p1 = st.text_input("Mot de passe", type="password")
+        p2 = st.text_input("Confirmer le mot de passe", type="password")
+        submit = st.form_submit_button("Créer le compte administrateur", type="primary")
+        if submit:
+            if not username.strip() or not p1:
+                st.error("Merci de renseigner un nom d'utilisateur et un mot de passe.")
+            elif len(p1) < 6:
+                st.error("Le mot de passe doit contenir au moins 6 caractères.")
+            elif p1 != p2:
+                st.error("Les deux mots de passe ne correspondent pas.")
+            else:
+                db.creer_utilisateur(username, p1, role="admin")
+                st.success("Compte administrateur créé avec succès. Connecte-toi ci-dessous.")
+                st.rerun()
+
+
+def afficher_ecran_connexion():
+    st.title("🏨 Swanky Apartments — PMS")
+    st.subheader("🔐 Connexion")
+    with st.form("form_login"):
+        username = st.text_input("Nom d'utilisateur")
+        password = st.text_input("Mot de passe", type="password")
+        submit = st.form_submit_button("Se connecter", type="primary")
+        if submit:
+            user = db.verifier_identifiants(username, password)
+            if user:
+                st.session_state.auth_user = user
+                st.rerun()
+            else:
+                st.error("Nom d'utilisateur ou mot de passe incorrect.")
+
+
+if db.compter_utilisateurs() == 0:
+    afficher_ecran_premiere_configuration()
+    st.stop()
+
+if st.session_state.auth_user is None:
+    afficher_ecran_connexion()
+    st.stop()
+
+NOM_ETABLISSEMENT = db.get_parametre("nom_etablissement", "Swanky Apartments")
+TAUX_TVA = float(db.get_parametre("taux_tva", db.TAUX_TVA_DEFAUT))
+
 # --- EN-TÊTE ---
 st.title(f"🏨 {NOM_ETABLISSEMENT} — PMS")
-st.caption(f"Système de Gestion Hôtelière | Connecté en tant que Réceptionniste | "
+st.caption(f"Système de Gestion Hôtelière | Connecté en tant que "
+           f"**{st.session_state.auth_user['username']}** ({st.session_state.auth_user['role']}) | "
            f"Date système : {datetime.now().strftime('%d/%m/%Y %H:%M')}")
 st.markdown("---")
 
-# --- BARRE LATÉRALE : PARAMÈTRES ---
+# --- BARRE LATÉRALE : COMPTE, PARAMÈTRES, UTILISATEURS ---
 with st.sidebar:
+    st.markdown(f"👤 Connecté : **{st.session_state.auth_user['username']}** "
+                f"({st.session_state.auth_user['role']})")
+    if st.button("🚪 Se déconnecter"):
+        st.session_state.auth_user = None
+        st.rerun()
+
+    with st.expander("🔑 Changer mon mot de passe"):
+        cur_pwd = st.text_input("Mot de passe actuel", type="password", key="cur_pwd")
+        new_pwd1 = st.text_input("Nouveau mot de passe", type="password", key="new_pwd1")
+        new_pwd2 = st.text_input("Confirmer le nouveau mot de passe", type="password", key="new_pwd2")
+        if st.button("Mettre à jour le mot de passe"):
+            verif = db.verifier_identifiants(st.session_state.auth_user["username"], cur_pwd)
+            if not verif:
+                st.error("Mot de passe actuel incorrect.")
+            elif len(new_pwd1) < 6:
+                st.error("Le nouveau mot de passe doit contenir au moins 6 caractères.")
+            elif new_pwd1 != new_pwd2:
+                st.error("Les deux nouveaux mots de passe ne correspondent pas.")
+            else:
+                db.changer_mot_de_passe(st.session_state.auth_user["username"], new_pwd1)
+                st.success("Mot de passe mis à jour.")
+
+    if st.session_state.auth_user["role"] == "admin":
+        with st.expander("👥 Gestion des utilisateurs"):
+            st.markdown("**Créer un nouveau compte**")
+            new_username = st.text_input("Nom d'utilisateur", key="new_user_username")
+            new_password = st.text_input("Mot de passe", type="password", key="new_user_password")
+            new_role = st.selectbox("Rôle", ["reception", "admin"], key="new_user_role")
+            if st.button("➕ Créer le compte"):
+                if not new_username.strip() or not new_password:
+                    st.warning("Nom d'utilisateur et mot de passe requis.")
+                elif len(new_password) < 6:
+                    st.warning("Le mot de passe doit contenir au moins 6 caractères.")
+                elif db.username_existe(new_username):
+                    st.warning("Ce nom d'utilisateur existe déjà.")
+                else:
+                    db.creer_utilisateur(new_username, new_password, role=new_role)
+                    st.success(f"Compte {new_username} créé.")
+                    st.rerun()
+
+            st.markdown("---")
+            st.markdown("**Comptes existants**")
+            for u in db.lister_utilisateurs():
+                colu1, colu2 = st.columns([2, 1])
+                statut = "🟢 Actif" if u["actif"] else "🔴 Désactivé"
+                colu1.write(f"**{u['username']}**  \n{u['role']} — {statut}")
+                if u["username"] != st.session_state.auth_user["username"]:
+                    label = "Désactiver" if u["actif"] else "Réactiver"
+                    if colu2.button(label, key=f"toggle_{u['username']}"):
+                        db.set_actif_utilisateur(u["username"], not u["actif"])
+                        st.rerun()
+
+    st.markdown("---")
     st.header("⚙️ Paramètres")
     nouveau_nom = st.text_input("Nom de l'établissement", value=NOM_ETABLISSEMENT)
     nouveau_taux = st.number_input("Taux de TVA (%)", min_value=0.0, max_value=100.0,
@@ -129,21 +238,22 @@ with col_droite:
         nuitees = st.number_input("Nombre de nuitées", min_value=1, value=1, step=1, key="nuitees_facture")
 
         tarif_applique = st.number_input(
-            "Tarif par nuitée appliqué (FCFA)",
+            "Tarif par nuitée appliqué (FCFA, TTC)",
             value=int(tarif_de_base),
             step=5000,
-            help=f"Tarif standard : {fmt_fcfa(tarif_de_base)}. Modifiez ce montant si un prix "
-                 f"dégressif a été accordé."
+            help=f"Tarif standard : {fmt_fcfa(tarif_de_base)} TTC (taxes comprises, comme affiché au "
+                 f"client). Modifiez ce montant si un prix dégressif a été accordé. Le HT et la TVA "
+                 f"sont calculés automatiquement à partir de ce prix TTC."
         )
 
         mode_paiement = st.selectbox("Mode de paiement", ["Espèces", "Mobile Money", "Carte bancaire", "Virement"])
         statut_paiement = st.radio("Statut du paiement", ["Payé", "En attente"], horizontal=True)
         notes_facture = st.text_area("Notes (optionnel)", height=68)
 
-        # Calcul en direct
-        montant_ht = tarif_applique * nuitees
-        montant_tva = round(montant_ht * TAUX_TVA / 100)
-        montant_ttc = montant_ht + montant_tva
+        # Calcul en direct : le tarif est TTC, le HT et la TVA en sont extraits
+        montant_ttc = tarif_applique * nuitees
+        montant_ht = round(montant_ttc / (1 + TAUX_TVA / 100))
+        montant_tva = montant_ttc - montant_ht
 
         st.markdown("---")
         c1, c2 = st.columns(2)
@@ -232,3 +342,4 @@ with col_droite:
                         if colb2.button("Marquer comme payé", key=f"payer_{f['numero_facture']}"):
                             db.maj_statut_paiement(f['numero_facture'], "Payé")
                             st.rerun()
+            
