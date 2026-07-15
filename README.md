@@ -1,4 +1,4 @@
-# Swanky Apartments — PMS Iplan
+# Swanky Apartments — PMS
 
 ## Installation
 
@@ -49,6 +49,23 @@ swanky_pms/
   hôtelier classique.
 - **Persistance complète** dans `swanky_pms.db` (chambres, réservations, factures, comptes,
   paramètres).
+
+## ⚠️ Décision : usage en local uniquement (Streamlit Cloud abandonné)
+
+Arrête d'utiliser le lien Streamlit Cloud (`....streamlit.app`) — il **efface la base de
+données** à chaque mise en veille (12h d'inactivité) ou redémarrage, ce qui contredit tes
+besoins de persistance, de gratuité et d'usage hors-ligne. Lance désormais l'application
+**uniquement** via `lancer_app.bat` sur l'ordinateur de la réception. Tant que cet ordinateur
+tourne, rien n'est jamais perdu ni redémarré, et personne n'est déconnecté sans avoir cliqué
+sur "Se déconnecter".
+
+## Sauvegarde automatique (nouveau)
+
+À chaque ouverture de l'application, une copie de `swanky_pms.db` est automatiquement
+enregistrée dans un dossier `backups/` (une fois par jour maximum). Les 30 sauvegardes les
+plus récentes sont conservées, les plus anciennes sont supprimées automatiquement. Pense
+malgré tout à copier ce dossier `backups/` de temps en temps sur une clé USB ou un cloud —
+en cas de panne totale de l'ordinateur, c'est ta seule protection.
 
 ## Utilisation 100% hors-ligne, gratuite, à vie
 
@@ -114,3 +131,4 @@ calcul TVA, génération Word et Excel (contenu vérifié). `streamlit`, `fpdf2`
 n'ont pas pu être installés dans mon environnement de génération (pas d'accès réseau) — pense
 à lancer `streamlit run app.py` de ton côté pour valider l'affichage (notamment le graphique
 de planning) avant mise en production.
+
