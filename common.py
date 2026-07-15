@@ -9,6 +9,7 @@ from datetime import datetime
 import database as db
 
 db.init_db()
+db.sauvegarder_base_si_necessaire()
 
 
 def fmt_fcfa(valeur):
@@ -146,4 +147,4 @@ def afficher_sidebar(user):
         st.markdown("---")
         st.caption("💡 Toutes les données sont sauvegardées automatiquement "
                    "dans le fichier `swanky_pms.db`.")
-
+        
