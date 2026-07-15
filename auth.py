@@ -31,3 +31,4 @@ def verify_password(password: str, salt_hex: str, stored_hash_hex: str) -> bool:
     """Vérifie un mot de passe fourni contre le hash stocké, en temps constant."""
     computed_hash, _ = hash_password(password, salt_hex)
     return secrets.compare_digest(computed_hash, stored_hash_hex)
+    
