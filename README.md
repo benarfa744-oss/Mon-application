@@ -1,4 +1,4 @@
-# Swanky Apartments — PMS
+# Swanky Apartments — PMS Iplan
 
 ## Installation
 
