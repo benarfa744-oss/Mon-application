@@ -102,6 +102,26 @@ def init_db():
             )
         """)
 
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS reservations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                numero_reservation TEXT UNIQUE NOT NULL,
+                chambre_nom TEXT NOT NULL,
+                chambre_type TEXT,
+                client TEXT NOT NULL,
+                telephone TEXT DEFAULT '',
+                societe TEXT DEFAULT '',
+                code_client TEXT DEFAULT '',
+                date_arrivee TEXT NOT NULL,
+                date_depart TEXT NOT NULL,
+                nb_personnes INTEGER NOT NULL DEFAULT 1,
+                tarif_nuit INTEGER NOT NULL,
+                statut TEXT NOT NULL DEFAULT 'Confirmée',
+                notes TEXT DEFAULT '',
+                date_creation TEXT NOT NULL
+            )
+        """)
+
         # Seed des chambres uniquement si la table est vide
         cur = conn.execute("SELECT COUNT(*) AS n FROM chambres")
         if cur.fetchone()["n"] == 0:
@@ -290,5 +310,97 @@ def changer_mot_de_passe(username, nouveau_password):
         conn.execute(
             "UPDATE utilisateurs SET password_hash = ?, salt = ? WHERE username = ?",
             (pwd_hash, salt, username)
-)
-        
+        )
+
+
+# ---------- RÉSERVATIONS (calendrier / planning) ----------
+
+def generer_numero_reservation():
+    annee = datetime.now().strftime("%Y")
+    with get_connection() as conn:
+        cur = conn.execute(
+            "SELECT COUNT(*) AS n FROM reservations WHERE numero_reservation LIKE ?",
+            (f"RES-{annee}-%",)
+        )
+        n = cur.fetchone()["n"] + 1
+        return f"RES-{annee}-{n:04d}"
+
+
+def chambre_disponible_periode(chambre_nom, date_arrivee, date_depart, exclure_reservation_id=None):
+    """
+    Vérifie qu'aucune réservation active (Confirmée ou En cours) ne chevauche
+    la période demandée pour cette chambre. Les dates sont des chaînes 'YYYY-MM-DD'.
+    """
+    query = """
+        SELECT COUNT(*) AS n FROM reservations
+        WHERE chambre_nom = ?
+          AND statut IN ('Confirmée', 'En cours')
+          AND date_arrivee < ?
+          AND date_depart > ?
+    """
+    params = [chambre_nom, date_depart, date_arrivee]
+    if exclure_reservation_id is not None:
+        query += " AND id != ?"
+        params.append(exclure_reservation_id)
+    with get_connection() as conn:
+        n = conn.execute(query, params).fetchone()["n"]
+        return n == 0
+
+
+def creer_reservation(chambre_nom, chambre_type, client, date_arrivee, date_depart,
+                       tarif_nuit, telephone="", societe="", code_client="",
+                       nb_personnes=1, notes=""):
+    numero = generer_numero_reservation()
+    date_creation = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with get_connection() as conn:
+        conn.execute("""
+            INSERT INTO reservations (
+                numero_reservation, chambre_nom, chambre_type, client, telephone,
+                societe, code_client, date_arrivee, date_depart, nb_personnes,
+                tarif_nuit, statut, notes, date_creation
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Confirmée', ?, ?)
+        """, (numero, chambre_nom, chambre_type, client, telephone, societe, code_client,
+              date_arrivee, date_depart, nb_personnes, tarif_nuit, notes, date_creation))
+    return numero
+
+
+def get_toutes_reservations():
+    with get_connection() as conn:
+        rows = conn.execute("SELECT * FROM reservations ORDER BY date_arrivee").fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_reservation(reservation_id):
+    with get_connection() as conn:
+        row = conn.execute("SELECT * FROM reservations WHERE id = ?", (reservation_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def maj_statut_reservation(reservation_id, statut):
+    with get_connection() as conn:
+        conn.execute("UPDATE reservations SET statut = ? WHERE id = ?", (statut, reservation_id))
+
+
+def effectuer_checkin(reservation_id):
+    """Marque la réservation comme 'En cours' et occupe la chambre correspondante."""
+    resa = get_reservation(reservation_id)
+    if resa is None:
+        return False
+    maj_statut_chambre(resa["chambre_nom"], "Occupé", resa["client"])
+    maj_statut_reservation(reservation_id, "En cours")
+    return True
+
+
+def effectuer_checkout(reservation_id):
+    """Marque la réservation comme 'Terminée' et libère la chambre correspondante."""
+    resa = get_reservation(reservation_id)
+    if resa is None:
+        return False
+    maj_statut_chambre(resa["chambre_nom"], "Disponible", "")
+    maj_statut_reservation(reservation_id, "Terminée")
+    return True
+
+
+def annuler_reservation(reservation_id):
+    maj_statut_reservation(reservation_id, "Annulée")
+    
