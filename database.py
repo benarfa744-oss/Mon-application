@@ -403,4 +403,33 @@ def effectuer_checkout(reservation_id):
 
 def annuler_reservation(reservation_id):
     maj_statut_reservation(reservation_id, "Annulée")
-    
+
+
+# ---------- SAUVEGARDE AUTOMATIQUE ----------
+
+def sauvegarder_base_si_necessaire(dossier_backup="backups", garder=30):
+    """
+    Copie swanky_pms.db dans un dossier de sauvegarde, une fois par jour maximum.
+    Conserve uniquement les `garder` sauvegardes les plus récentes (les plus
+    anciennes sont supprimées automatiquement).
+    """
+    import os
+    import shutil
+    import glob
+
+    if not os.path.exists(DB_PATH):
+        return
+
+    os.makedirs(dossier_backup, exist_ok=True)
+    aujourdhui = datetime.now().strftime("%Y-%m-%d")
+    nom_backup = os.path.join(dossier_backup, f"swanky_pms_{aujourdhui}.db")
+
+    if not os.path.exists(nom_backup):
+        shutil.copy2(DB_PATH, nom_backup)
+
+    # Nettoyage : ne garder que les N sauvegardes les plus récentes (à chaque appel)
+    sauvegardes = sorted(glob.glob(os.path.join(dossier_backup, "swanky_pms_*.db")))
+    if len(sauvegardes) > garder:
+        for ancienne in sauvegardes[:-garder]:
+            os.remove(ancienne)
+            
