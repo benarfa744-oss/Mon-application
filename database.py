@@ -114,7 +114,9 @@ def init_db():
                 actif INTEGER NOT NULL DEFAULT 1,
                 date_creation TEXT NOT NULL
             )
-        """)conn.execute("""
+        """)
+
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS reservations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 etablissement_id INTEGER,
@@ -205,7 +207,8 @@ def get_etablissement(etablissement_id):
 def maj_abonnement(etablissement_id, statut, jours_supplementaires=None):
     with get_connection() as conn:
         if jours_supplementaires is not None:
-            nouvelle_date = (datetime.now() + timedelta(days=jours_supplementaires)).strftime("%Y-%m-%d")conn.execute(
+            nouvelle_date = (datetime.now() + timedelta(days=jours_supplementaires)).strftime("%Y-%m-%d")
+            conn.execute(
                 "UPDATE etablissements SET statut_abonnement = ?, date_expiration = ? WHERE id = ?",
                 (statut, nouvelle_date, etablissement_id)
             )
@@ -305,7 +308,9 @@ def nom_chambre_existe(etablissement_id, nom, exclure_id=None):
         return conn.execute(query, params).fetchone() is not None
 
 
-# ---------- FACTURES ----------def generer_numero_facture(etablissement_id):
+# ---------- FACTURES ----------
+
+def generer_numero_facture(etablissement_id):
     annee = datetime.now().strftime("%Y")
     with get_connection() as conn:
         cur = conn.execute(
@@ -407,7 +412,10 @@ def creer_utilisateur(username, password, role="reception", etablissement_id=Non
             "INSERT INTO utilisateurs (etablissement_id, username, password_hash, salt, role, actif, date_creation) "
             "VALUES (?, ?, ?, ?, ?, 1, ?)",
             (etablissement_id, username.strip(), pwd_hash, salt, role, date_creation)
-        )def verifier_identifiants(username, password):
+        )
+
+
+def verifier_identifiants(username, password):
     from auth import verify_password
     with get_connection() as conn:
         row = conn.execute(
@@ -510,7 +518,10 @@ def get_reservation(reservation_id):
 
 def maj_statut_reservation(reservation_id, statut):
     with get_connection() as conn:
-        conn.execute("UPDATE reservations SET statut = ? WHERE id = ?", (statut, reservation_id))def effectuer_checkin(reservation_id):
+        conn.execute("UPDATE reservations SET statut = ? WHERE id = ?", (statut, reservation_id))
+
+
+def effectuer_checkin(reservation_id):
     resa = get_reservation(reservation_id)
     if resa is None:
         return False
