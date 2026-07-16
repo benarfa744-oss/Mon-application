@@ -1,39 +1,29 @@
 """
-Couche d'accès aux données (SQLite) pour Swanky Apartments PMS.
-Toutes les données (chambres, factures) sont persistées dans un fichier
-swanky_pms.db qui reste sur le disque entre deux lancements de l'application.
+Couche d'accès aux données (SQLite) pour le PMS multi-établissements.
+Chaque hôtel client (établissement) a ses propres chambres, réservations,
+factures et utilisateurs, cloisonnés par etablissement_id. Un rôle spécial
+'super_admin' (toi, l'exploitant du SaaS) gère la liste des établissements
+et leur statut d'abonnement.
 """
 
 import sqlite3
-from datetime import datetime
+import os
+from datetime import datetime, timedelta
 from contextlib import contextmanager
 
 DB_PATH = "swanky_pms.db"
 
-# Données initiales des chambres (utilisées uniquement au tout premier lancement)
-CHAMBRES_INITIALES = [
+CHAMBRES_DEMO = [
     ("MIAMI", "STD VIP USA", 85000, "Disponible", "", "Etage 1"),
     ("LAS-VEGAS", "STD VIP USA", 85000, "Disponible", "", "Etage 2"),
-    ("NEW YORK", "STD VIP USA", 85000, "Disponible", "", "Etage 2"),
-    ("ACCRA", "APPT AFRIQ", 120000, "Disponible", "", "Etage 1"),
-    ("DOUALA", "APPT AFRIQ", 120000, "Occupé", "RAMANAN DILAI", "Etage 1"),
-    ("ISTANBUL", "STD EUROPE", 65000, "Disponible", "", "Etage 0"),
-    ("MADRID", "STD EUROPE", 65000, "Disponible", "", "Etage 0"),
     ("PARIS", "STD EUROPE", 65000, "Disponible", "", "Etage 1"),
-    ("LONDRES", "STD EUROPE", 65000, "Occupé", "BEIDI WAFFA", "Etage 1"),
+    ("LONDRES", "STD EUROPE", 65000, "Disponible", "", "Etage 1"),
     ("BERLIN", "CH EUROPE", 45000, "Disponible", "", "Etage 2"),
-    ("BRUXELLES", "CH EUROPE", 45000, "Disponible", "", "Etage 2"),
-    ("ROME", "CH EUROPE", 45000, "Occupé", "SILA HERVE", "Etage 2"),
-    ("VENISE", "CH EUROPE", 45000, "Occupé", "DJABIR OUBIR", "Etage 2"),
     ("DAKAR", "STD AFRIQ", 55000, "Disponible", "", "Etage 2"),
-    ("LAGOS", "STD AFRIQ", 55000, "Disponible", "", "Etage 2"),
-    ("BANGKOK", "STD ASIE", 55000, "Disponible", "", "Etage 2"),
-    ("JAKARTA", "STD ASIE", 55000, "Disponible", "", "Etage 2"),
-    ("PEKIN", "APPT ASIE", 120000, "Disponible", "", "Etage 1"),
-    ("SEOUL", "APPT ASIE", 120000, "Occupé", "KAMGUE TAKOUGAN", "Etage 1"),
 ]
 
-TAUX_TVA_DEFAUT = 19.25  # % — modifiable dans les paramètres de l'application
+TAUX_TVA_DEFAUT = 19.25
+JOURS_ESSAI_DEFAUT = 30
 
 
 @contextmanager
@@ -41,6 +31,7 @@ def get_connection():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")
     try:
         yield conn
         conn.commit()
@@ -48,25 +39,53 @@ def get_connection():
         conn.close()
 
 
+def _colonne_existe(conn, table, colonne):
+    cols = [r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+    return colonne in cols
+
+
+def _table_existe(conn, table):
+    r = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone()
+    return r is not None
+
+
 def init_db():
-    """Crée les tables si elles n'existent pas et alimente les chambres de base."""
     with get_connection() as conn:
+        migration_necessaire = _table_existe(conn, "chambres") and not _colonne_existe(conn, "chambres", "etablissement_id")
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS etablissements (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nom TEXT NOT NULL,
+                telephone_contact TEXT DEFAULT '',
+                taux_tva REAL NOT NULL DEFAULT 19.25,
+                statut_abonnement TEXT NOT NULL DEFAULT 'Essai',
+                date_expiration TEXT,
+                date_creation TEXT NOT NULL
+            )
+        """)
+
         conn.execute("""
             CREATE TABLE IF NOT EXISTS chambres (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                nom TEXT UNIQUE NOT NULL,
+                etablissement_id INTEGER,
+                nom TEXT NOT NULL,
                 type TEXT NOT NULL,
                 tarif INTEGER NOT NULL,
                 statut TEXT NOT NULL DEFAULT 'Disponible',
                 client TEXT DEFAULT '',
-                etage TEXT
+                etage TEXT,
+                UNIQUE(etablissement_id, nom)
             )
         """)
 
         conn.execute("""
             CREATE TABLE IF NOT EXISTS factures (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                numero_facture TEXT UNIQUE NOT NULL,
+                etablissement_id INTEGER,
+                numero_facture TEXT NOT NULL,
                 date_creation TEXT NOT NULL,
                 chambre_nom TEXT NOT NULL,
                 chambre_type TEXT,
@@ -79,20 +98,15 @@ def init_db():
                 montant_ttc INTEGER NOT NULL,
                 statut_paiement TEXT DEFAULT 'Payé',
                 mode_paiement TEXT DEFAULT 'Espèces',
-                notes TEXT DEFAULT ''
-            )
-        """)
-
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS parametres (
-                cle TEXT PRIMARY KEY,
-                valeur TEXT
+                notes TEXT DEFAULT '',
+                UNIQUE(etablissement_id, numero_facture)
             )
         """)
 
         conn.execute("""
             CREATE TABLE IF NOT EXISTS utilisateurs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                etablissement_id INTEGER,
                 username TEXT UNIQUE NOT NULL,
                 password_hash TEXT NOT NULL,
                 salt TEXT NOT NULL,
@@ -100,12 +114,11 @@ def init_db():
                 actif INTEGER NOT NULL DEFAULT 1,
                 date_creation TEXT NOT NULL
             )
-        """)
-
-        conn.execute("""
+        """)conn.execute("""
             CREATE TABLE IF NOT EXISTS reservations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                numero_reservation TEXT UNIQUE NOT NULL,
+                etablissement_id INTEGER,
+                numero_reservation TEXT NOT NULL,
                 chambre_nom TEXT NOT NULL,
                 chambre_type TEXT,
                 client TEXT NOT NULL,
@@ -118,82 +131,207 @@ def init_db():
                 tarif_nuit INTEGER NOT NULL,
                 statut TEXT NOT NULL DEFAULT 'Confirmée',
                 notes TEXT DEFAULT '',
-                date_creation TEXT NOT NULL
+                date_creation TEXT NOT NULL,
+                UNIQUE(etablissement_id, numero_reservation)
             )
         """)
 
-        # Seed des chambres uniquement si la table est vide
-        cur = conn.execute("SELECT COUNT(*) AS n FROM chambres")
-        if cur.fetchone()["n"] == 0:
+        if migration_necessaire:
+            _migrer_vers_multi_etablissements(conn)
+
+
+def _migrer_vers_multi_etablissements(conn):
+    nom_existant = "Mon Établissement"
+    taux_existant = TAUX_TVA_DEFAUT
+    if _table_existe(conn, "parametres"):
+        r = conn.execute("SELECT valeur FROM parametres WHERE cle='nom_etablissement'").fetchone()
+        if r:
+            nom_existant = r["valeur"]
+        r2 = conn.execute("SELECT valeur FROM parametres WHERE cle='taux_tva'").fetchone()
+        if r2:
+            taux_existant = float(r2["valeur"])
+
+    date_creation = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cur = conn.execute(
+        "INSERT INTO etablissements (nom, telephone_contact, taux_tva, statut_abonnement, date_expiration, date_creation) "
+        "VALUES (?, '', ?, 'Actif', NULL, ?)",
+        (nom_existant, taux_existant, date_creation)
+    )
+    etab_id = cur.lastrowid
+
+    for table in ("chambres", "factures", "utilisateurs", "reservations"):
+        if not _colonne_existe(conn, table, "etablissement_id"):
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN etablissement_id INTEGER")
+        conn.execute(f"UPDATE {table} SET etablissement_id = ? WHERE etablissement_id IS NULL", (etab_id,))
+
+
+# ---------- ÉTABLISSEMENTS ----------
+
+def creer_etablissement(nom, telephone_contact="", taux_tva=None, jours_essai=JOURS_ESSAI_DEFAUT, avec_chambres_demo=True):
+    if taux_tva is None:
+        taux_tva = TAUX_TVA_DEFAUT
+    date_creation = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    date_expiration = (datetime.now() + timedelta(days=jours_essai)).strftime("%Y-%m-%d")
+
+    with get_connection() as conn:
+        cur = conn.execute(
+            "INSERT INTO etablissements (nom, telephone_contact, taux_tva, statut_abonnement, date_expiration, date_creation) "
+            "VALUES (?, ?, ?, 'Essai', ?, ?)",
+            (nom.strip(), telephone_contact.strip(), taux_tva, date_expiration, date_creation)
+        )
+        etab_id = cur.lastrowid
+
+        if avec_chambres_demo:
             conn.executemany(
-                "INSERT INTO chambres (nom, type, tarif, statut, client, etage) VALUES (?, ?, ?, ?, ?, ?)",
-                CHAMBRES_INITIALES
+                "INSERT INTO chambres (etablissement_id, nom, type, tarif, statut, client, etage) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [(etab_id,) + chambre for chambre in CHAMBRES_DEMO]
+            )
+    return etab_id
+
+
+def lister_etablissements():
+    with get_connection() as conn:
+        rows = conn.execute("SELECT * FROM etablissements ORDER BY nom").fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_etablissement(etablissement_id):
+    with get_connection() as conn:
+        row = conn.execute("SELECT * FROM etablissements WHERE id = ?", (etablissement_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def maj_abonnement(etablissement_id, statut, jours_supplementaires=None):
+    with get_connection() as conn:
+        if jours_supplementaires is not None:
+            nouvelle_date = (datetime.now() + timedelta(days=jours_supplementaires)).strftime("%Y-%m-%d")conn.execute(
+                "UPDATE etablissements SET statut_abonnement = ?, date_expiration = ? WHERE id = ?",
+                (statut, nouvelle_date, etablissement_id)
+            )
+        else:
+            conn.execute(
+                "UPDATE etablissements SET statut_abonnement = ? WHERE id = ?",
+                (statut, etablissement_id)
             )
 
-        # Seed du taux de TVA par défaut
-        cur = conn.execute("SELECT valeur FROM parametres WHERE cle = 'taux_tva'")
-        if cur.fetchone() is None:
-            conn.execute("INSERT INTO parametres (cle, valeur) VALUES ('taux_tva', ?)", (str(TAUX_TVA_DEFAUT),))
 
-        cur = conn.execute("SELECT valeur FROM parametres WHERE cle = 'nom_etablissement'")
-        if cur.fetchone() is None:
-            conn.execute("INSERT INTO parametres (cle, valeur) VALUES ('nom_etablissement', ?)", ("Swanky Apartments",))
+def maj_parametres_etablissement(etablissement_id, nom=None, taux_tva=None, telephone_contact=None):
+    with get_connection() as conn:
+        if nom is not None:
+            conn.execute("UPDATE etablissements SET nom = ? WHERE id = ?", (nom, etablissement_id))
+        if taux_tva is not None:
+            conn.execute("UPDATE etablissements SET taux_tva = ? WHERE id = ?", (taux_tva, etablissement_id))
+        if telephone_contact is not None:
+            conn.execute("UPDATE etablissements SET telephone_contact = ? WHERE id = ?", (telephone_contact, etablissement_id))
+
+
+def etablissement_actif(etablissement_id):
+    etab = get_etablissement(etablissement_id)
+    if etab is None:
+        return False
+    if etab["statut_abonnement"] not in ("Actif", "Essai"):
+        return False
+    if etab["date_expiration"]:
+        aujourdhui = datetime.now().strftime("%Y-%m-%d")
+        if etab["date_expiration"] < aujourdhui:
+            return False
+    return True
+
+
+def supprimer_etablissement(etablissement_id):
+    with get_connection() as conn:
+        for table in ("chambres", "factures", "reservations", "utilisateurs"):
+            conn.execute(f"DELETE FROM {table} WHERE etablissement_id = ?", (etablissement_id,))
+        conn.execute("DELETE FROM etablissements WHERE id = ?", (etablissement_id,))
 
 
 # ---------- CHAMBRES ----------
 
-def get_toutes_chambres():
+def get_toutes_chambres(etablissement_id):
     with get_connection() as conn:
-        rows = conn.execute("SELECT * FROM chambres ORDER BY etage, type, nom").fetchall()
+        rows = conn.execute(
+            "SELECT * FROM chambres WHERE etablissement_id = ? ORDER BY etage, type, nom",
+            (etablissement_id,)
+        ).fetchall()
         return [dict(r) for r in rows]
 
 
-def maj_statut_chambre(nom, statut, client=""):
+def maj_statut_chambre(etablissement_id, nom, statut, client=""):
     with get_connection() as conn:
         conn.execute(
-            "UPDATE chambres SET statut = ?, client = ? WHERE nom = ?",
-            (statut, client if statut == "Occupé" else "", nom)
+            "UPDATE chambres SET statut = ?, client = ? WHERE etablissement_id = ? AND nom = ?",
+            (statut, client if statut == "Occupé" else "", etablissement_id, nom)
         )
 
 
-def get_chambre(nom):
+def get_chambre(etablissement_id, nom):
     with get_connection() as conn:
-        row = conn.execute("SELECT * FROM chambres WHERE nom = ?", (nom,)).fetchone()
+        row = conn.execute(
+            "SELECT * FROM chambres WHERE etablissement_id = ? AND nom = ?", (etablissement_id, nom)
+        ).fetchone()
         return dict(row) if row else None
 
 
-# ---------- FACTURES ----------
+def ajouter_chambre(etablissement_id, nom, type_chambre, tarif, etage=""):
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO chambres (etablissement_id, nom, type, tarif, statut, client, etage) "
+            "VALUES (?, ?, ?, ?, 'Disponible', '', ?)",
+            (etablissement_id, nom.strip(), type_chambre.strip(), tarif, etage.strip())
+        )
 
-def generer_numero_facture():
-    """Génère un numéro de facture séquentiel du type FACT-2026-0001."""
+
+def modifier_chambre(chambre_id, nom, type_chambre, tarif, etage):
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE chambres SET nom = ?, type = ?, tarif = ?, etage = ? WHERE id = ?",
+            (nom.strip(), type_chambre.strip(), tarif, etage.strip(), chambre_id)
+        )
+
+
+def supprimer_chambre(chambre_id):
+    with get_connection() as conn:
+        conn.execute("DELETE FROM chambres WHERE id = ?", (chambre_id,))
+
+
+def nom_chambre_existe(etablissement_id, nom, exclure_id=None):
+    query = "SELECT 1 FROM chambres WHERE etablissement_id = ? AND nom = ?"
+    params = [etablissement_id, nom.strip()]
+    if exclure_id is not None:
+        query += " AND id != ?"
+        params.append(exclure_id)
+    with get_connection() as conn:
+        return conn.execute(query, params).fetchone() is not None
+
+
+# ---------- FACTURES ----------def generer_numero_facture(etablissement_id):
     annee = datetime.now().strftime("%Y")
     with get_connection() as conn:
         cur = conn.execute(
-            "SELECT COUNT(*) AS n FROM factures WHERE numero_facture LIKE ?",
-            (f"FACT-{annee}-%",)
+            "SELECT COUNT(*) AS n FROM factures WHERE etablissement_id = ? AND numero_facture LIKE ?",
+            (etablissement_id, f"FACT-{annee}-%")
         )
         n = cur.fetchone()["n"] + 1
         return f"FACT-{annee}-{n:04d}"
 
 
-def creer_facture(chambre_nom, chambre_type, client, nuitees, tarif_unitaire,
+def creer_facture(etablissement_id, chambre_nom, chambre_type, client, nuitees, tarif_unitaire,
                    taux_tva, statut_paiement="Payé", mode_paiement="Espèces", notes=""):
-    # Le tarif appliqué est le prix TTC affiché/payé par nuitée (pratique hôtelière
-    # standard : le client voit et paie ce montant, la TVA en est extraite ensuite).
     montant_ttc = int(round(tarif_unitaire * nuitees))
     montant_ht = int(round(montant_ttc / (1 + taux_tva / 100)))
     montant_tva = montant_ttc - montant_ht
-    numero = generer_numero_facture()
+    numero = generer_numero_facture(etablissement_id)
     date_creation = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     with get_connection() as conn:
         conn.execute("""
             INSERT INTO factures (
-                numero_facture, date_creation, chambre_nom, chambre_type, client,
+                etablissement_id, numero_facture, date_creation, chambre_nom, chambre_type, client,
                 nuitees, tarif_unitaire, montant_ht, taux_tva, montant_tva, montant_ttc,
                 statut_paiement, mode_paiement, notes
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (numero, date_creation, chambre_nom, chambre_type, client, nuitees,
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (etablissement_id, numero, date_creation, chambre_nom, chambre_type, client, nuitees,
               tarif_unitaire, montant_ht, taux_tva, montant_tva, montant_ttc,
               statut_paiement, mode_paiement, notes))
 
@@ -215,45 +353,43 @@ def creer_facture(chambre_nom, chambre_type, client, nuitees, tarif_unitaire,
     }
 
 
-def get_toutes_factures():
+def get_toutes_factures(etablissement_id):
     with get_connection() as conn:
-        rows = conn.execute("SELECT * FROM factures ORDER BY id DESC").fetchall()
+        rows = conn.execute(
+            "SELECT * FROM factures WHERE etablissement_id = ? ORDER BY id DESC", (etablissement_id,)
+        ).fetchall()
         return [dict(r) for r in rows]
 
 
-def get_facture_par_numero(numero):
+def get_facture_par_numero(etablissement_id, numero):
     with get_connection() as conn:
-        row = conn.execute("SELECT * FROM factures WHERE numero_facture = ?", (numero,)).fetchone()
+        row = conn.execute(
+            "SELECT * FROM factures WHERE etablissement_id = ? AND numero_facture = ?",
+            (etablissement_id, numero)
+        ).fetchone()
         return dict(row) if row else None
 
 
-def maj_statut_paiement(numero, statut):
-    with get_connection() as conn:
-        conn.execute("UPDATE factures SET statut_paiement = ? WHERE numero_facture = ?", (statut, numero))
-
-
-# ---------- PARAMÈTRES ----------
-
-def get_parametre(cle, defaut=None):
-    with get_connection() as conn:
-        row = conn.execute("SELECT valeur FROM parametres WHERE cle = ?", (cle,)).fetchone()
-        return row["valeur"] if row else defaut
-
-
-def set_parametre(cle, valeur):
+def maj_statut_paiement(etablissement_id, numero, statut):
     with get_connection() as conn:
         conn.execute(
-            "INSERT INTO parametres (cle, valeur) VALUES (?, ?) "
-            "ON CONFLICT(cle) DO UPDATE SET valeur = excluded.valeur",
-            (cle, str(valeur))
+            "UPDATE factures SET statut_paiement = ? WHERE etablissement_id = ? AND numero_facture = ?",
+            (statut, etablissement_id, numero)
         )
 
 
-# ---------- UTILISATEURS (authentification) ----------
+# ---------- UTILISATEURS ----------
 
 def compter_utilisateurs():
     with get_connection() as conn:
         return conn.execute("SELECT COUNT(*) AS n FROM utilisateurs").fetchone()["n"]
+
+
+def compter_super_admins():
+    with get_connection() as conn:
+        return conn.execute(
+            "SELECT COUNT(*) AS n FROM utilisateurs WHERE role = 'super_admin'"
+        ).fetchone()["n"]
 
 
 def username_existe(username):
@@ -262,21 +398,16 @@ def username_existe(username):
         return row is not None
 
 
-def creer_utilisateur(username, password, role="reception"):
-    """Crée un compte utilisateur. Le mot de passe est haché avant stockage."""
+def creer_utilisateur(username, password, role="reception", etablissement_id=None):
     from auth import hash_password
     pwd_hash, salt = hash_password(password)
     date_creation = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with get_connection() as conn:
         conn.execute(
-            "INSERT INTO utilisateurs (username, password_hash, salt, role, actif, date_creation) "
-            "VALUES (?, ?, ?, ?, 1, ?)",
-            (username.strip(), pwd_hash, salt, role, date_creation)
-        )
-
-
-def verifier_identifiants(username, password):
-    """Retourne le dict utilisateur si les identifiants sont valides et le compte actif, sinon None."""
+            "INSERT INTO utilisateurs (etablissement_id, username, password_hash, salt, role, actif, date_creation) "
+            "VALUES (?, ?, ?, ?, ?, 1, ?)",
+            (etablissement_id, username.strip(), pwd_hash, salt, role, date_creation)
+        )def verifier_identifiants(username, password):
     from auth import verify_password
     with get_connection() as conn:
         row = conn.execute(
@@ -290,10 +421,12 @@ def verifier_identifiants(username, password):
     return None
 
 
-def lister_utilisateurs():
+def lister_utilisateurs(etablissement_id):
     with get_connection() as conn:
         rows = conn.execute(
-            "SELECT id, username, role, actif, date_creation FROM utilisateurs ORDER BY username"
+            "SELECT id, username, role, actif, date_creation FROM utilisateurs "
+            "WHERE etablissement_id = ? ORDER BY username",
+            (etablissement_id,)
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -313,32 +446,28 @@ def changer_mot_de_passe(username, nouveau_password):
         )
 
 
-# ---------- RÉSERVATIONS (calendrier / planning) ----------
+# ---------- RÉSERVATIONS ----------
 
-def generer_numero_reservation():
+def generer_numero_reservation(etablissement_id):
     annee = datetime.now().strftime("%Y")
     with get_connection() as conn:
         cur = conn.execute(
-            "SELECT COUNT(*) AS n FROM reservations WHERE numero_reservation LIKE ?",
-            (f"RES-{annee}-%",)
+            "SELECT COUNT(*) AS n FROM reservations WHERE etablissement_id = ? AND numero_reservation LIKE ?",
+            (etablissement_id, f"RES-{annee}-%")
         )
         n = cur.fetchone()["n"] + 1
         return f"RES-{annee}-{n:04d}"
 
 
-def chambre_disponible_periode(chambre_nom, date_arrivee, date_depart, exclure_reservation_id=None):
-    """
-    Vérifie qu'aucune réservation active (Confirmée ou En cours) ne chevauche
-    la période demandée pour cette chambre. Les dates sont des chaînes 'YYYY-MM-DD'.
-    """
+def chambre_disponible_periode(etablissement_id, chambre_nom, date_arrivee, date_depart, exclure_reservation_id=None):
     query = """
         SELECT COUNT(*) AS n FROM reservations
-        WHERE chambre_nom = ?
+        WHERE etablissement_id = ? AND chambre_nom = ?
           AND statut IN ('Confirmée', 'En cours')
           AND date_arrivee < ?
           AND date_depart > ?
     """
-    params = [chambre_nom, date_depart, date_arrivee]
+    params = [etablissement_id, chambre_nom, date_depart, date_arrivee]
     if exclure_reservation_id is not None:
         query += " AND id != ?"
         params.append(exclure_reservation_id)
@@ -347,26 +476,29 @@ def chambre_disponible_periode(chambre_nom, date_arrivee, date_depart, exclure_r
         return n == 0
 
 
-def creer_reservation(chambre_nom, chambre_type, client, date_arrivee, date_depart,
+def creer_reservation(etablissement_id, chambre_nom, chambre_type, client, date_arrivee, date_depart,
                        tarif_nuit, telephone="", societe="", code_client="",
                        nb_personnes=1, notes=""):
-    numero = generer_numero_reservation()
+    numero = generer_numero_reservation(etablissement_id)
     date_creation = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with get_connection() as conn:
         conn.execute("""
             INSERT INTO reservations (
-                numero_reservation, chambre_nom, chambre_type, client, telephone,
+                etablissement_id, numero_reservation, chambre_nom, chambre_type, client, telephone,
                 societe, code_client, date_arrivee, date_depart, nb_personnes,
                 tarif_nuit, statut, notes, date_creation
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Confirmée', ?, ?)
-        """, (numero, chambre_nom, chambre_type, client, telephone, societe, code_client,
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Confirmée', ?, ?)
+        """, (etablissement_id, numero, chambre_nom, chambre_type, client, telephone, societe, code_client,
               date_arrivee, date_depart, nb_personnes, tarif_nuit, notes, date_creation))
     return numero
 
 
-def get_toutes_reservations():
+def get_toutes_reservations(etablissement_id):
     with get_connection() as conn:
-        rows = conn.execute("SELECT * FROM reservations ORDER BY date_arrivee").fetchall()
+        rows = conn.execute(
+            "SELECT * FROM reservations WHERE etablissement_id = ? ORDER BY date_arrivee",
+            (etablissement_id,)
+        ).fetchall()
         return [dict(r) for r in rows]
 
 
@@ -378,58 +510,8 @@ def get_reservation(reservation_id):
 
 def maj_statut_reservation(reservation_id, statut):
     with get_connection() as conn:
-        conn.execute("UPDATE reservations SET statut = ? WHERE id = ?", (statut, reservation_id))
-
-
-def effectuer_checkin(reservation_id):
-    """Marque la réservation comme 'En cours' et occupe la chambre correspondante."""
+        conn.execute("UPDATE reservations SET statut = ? WHERE id = ?", (statut, reservation_id))def effectuer_checkin(reservation_id):
     resa = get_reservation(reservation_id)
     if resa is None:
         return False
-    maj_statut_chambre(resa["chambre_nom"], "Occupé", resa["client"])
-    maj_statut_reservation(reservation_id, "En cours")
-    return True
-
-
-def effectuer_checkout(reservation_id):
-    """Marque la réservation comme 'Terminée' et libère la chambre correspondante."""
-    resa = get_reservation(reservation_id)
-    if resa is None:
-        return False
-    maj_statut_chambre(resa["chambre_nom"], "Disponible", "")
-    maj_statut_reservation(reservation_id, "Terminée")
-    return True
-
-
-def annuler_reservation(reservation_id):
-    maj_statut_reservation(reservation_id, "Annulée")
-
-
-# ---------- SAUVEGARDE AUTOMATIQUE ----------
-
-def sauvegarder_base_si_necessaire(dossier_backup="backups", garder=30):
-    """
-    Copie swanky_pms.db dans un dossier de sauvegarde, une fois par jour maximum.
-    Conserve uniquement les `garder` sauvegardes les plus récentes (les plus
-    anciennes sont supprimées automatiquement).
-    """
-    import os
-    import shutil
-    import glob
-
-    if not os.path.exists(DB_PATH):
-        return
-
-    os.makedirs(dossier_backup, exist_ok=True)
-    aujourdhui = datetime.now().strftime("%Y-%m-%d")
-    nom_backup = os.path.join(dossier_backup, f"swanky_pms_{aujourdhui}.db")
-
-    if not os.path.exists(nom_backup):
-        shutil.copy2(DB_PATH, nom_backup)
-
-    # Nettoyage : ne garder que les N sauvegardes les plus récentes (à chaque appel)
-    sauvegardes = sorted(glob.glob(os.path.join(dossier_backup, "swanky_pms_*.db")))
-    if len(sauvegardes) > garder:
-        for ancienne in sauvegardes[:-garder]:
-            os.remove(ancienne)
-            
+    maj_statut
