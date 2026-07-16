@@ -4,6 +4,8 @@ if user["role"] != "super_admin":
             _afficher_ecran_abonnement_inactif(user, etab)
             st.stop()
 
+def get_user():
+    user = ...
     return user
 
 
