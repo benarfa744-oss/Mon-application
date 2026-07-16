@@ -16,17 +16,18 @@ def fmt_fcfa(valeur):
     return f"{valeur:,.0f}".replace(",", " ") + " FCFA"
 
 
-def _afficher_ecran_premiere_configuration():
-    st.title("🏨 Swanky Apartments — PMS")
-    st.subheader("🔐 Configuration initiale")
-    st.info("Aucun compte n'existe encore sur cette installation. Crée le premier "
-             "compte — il sera administrateur et pourra ensuite créer les comptes "
-             "des autres membres de l'équipe.")
-    with st.form("form_setup_admin"):
-        username = st.text_input("Nom d'utilisateur")
+def _afficher_ecran_creation_super_admin():
+    st.image("assets/logo.png", width=110)
+    st.title("PMS Hôtelier — Multi-établissements")
+    st.subheader("🔐 Configuration initiale de la plateforme")
+    st.info("Aucun compte super-administrateur n'existe encore. Ce compte est le tien "
+             "(l'exploitant de la plateforme) — il te permettra de créer et gérer les "
+             "établissements clients (hôtels), pas de gérer un hôtel en particulier.")
+    with st.form("form_setup_super_admin"):
+        username = st.text_input("Nom d'utilisateur (super-admin)")
         p1 = st.text_input("Mot de passe", type="password")
         p2 = st.text_input("Confirmer le mot de passe", type="password")
-        submit = st.form_submit_button("Créer le compte administrateur", type="primary")
+        submit = st.form_submit_button("Créer le compte super-administrateur", type="primary")
         if submit:
             if not username.strip() or not p1:
                 st.error("Merci de renseigner un nom d'utilisateur et un mot de passe.")
@@ -34,14 +35,17 @@ def _afficher_ecran_premiere_configuration():
                 st.error("Le mot de passe doit contenir au moins 6 caractères.")
             elif p1 != p2:
                 st.error("Les deux mots de passe ne correspondent pas.")
+            elif db.username_existe(username):
+                st.error("Ce nom d'utilisateur existe déjà.")
             else:
-                db.creer_utilisateur(username, p1, role="admin")
-                st.success("Compte administrateur créé avec succès. Connecte-toi ci-dessous.")
+                db.creer_utilisateur(username, p1, role="super_admin", etablissement_id=None)
+                st.success("Compte super-administrateur créé avec succès. Connecte-toi ci-dessous.")
                 st.rerun()
 
 
 def _afficher_ecran_connexion():
-    st.title("🏨 Swanky Apartments — PMS")
+    st.image("assets/logo.png", width=110)
+    st.title("PMS Hôtelier")
     st.subheader("🔐 Connexion")
     with st.form("form_login"):
         username = st.text_input("Nom d'utilisateur")
@@ -56,32 +60,63 @@ def _afficher_ecran_connexion():
                 st.error("Nom d'utilisateur ou mot de passe incorrect.")
 
 
+def _afficher_ecran_abonnement_inactif(user, etab):
+    st.image("assets/logo.png", width=110)
+    st.title(etab["nom"] if etab else "Établissement")
+    st.error("⛔ L'abonnement de cet établissement n'est plus actif.")
+    if etab and etab["statut_abonnement"] == "Suspendu":
+        st.write("Le compte a été suspendu. Contacte l'administrateur de la plateforme pour le réactiver.")
+    else:
+        st.write(f"La période d'essai ou l'abonnement a expiré "
+                 f"(date d'expiration : {etab['date_expiration'] if etab else '—'}). "
+                 f"Merci de régulariser le paiement pour continuer à utiliser l'application.")
+    if st.button("🚪 Se déconnecter"):
+        st.session_state.auth_user = None
+        st.rerun()
+
+
 def garantir_authentification():
     """
-    À appeler en tout premier sur chaque page. Affiche l'écran de configuration
-    initiale ou de connexion si nécessaire (et arrête l'exécution de la page avec
-    st.stop()), sinon retourne le dict de l'utilisateur connecté.
+    À appeler en tout premier sur chaque page. Gère la création du compte
+    super-admin (une seule fois), la connexion, et le blocage si l'abonnement
+    de l'établissement n'est plus actif. Retourne le dict de l'utilisateur connecté.
     """
     if "auth_user" not in st.session_state:
         st.session_state.auth_user = None
 
-    if db.compter_utilisateurs() == 0:
-        _afficher_ecran_premiere_configuration()
+    if db.compter_super_admins() == 0:
+        _afficher_ecran_creation_super_admin()
         st.stop()
 
     if st.session_state.auth_user is None:
         _afficher_ecran_connexion()
         st.stop()
 
-    return st.session_state.auth_user
+    user = st.session_state.auth_user
+
+    if user["role"] != "super_admin":
+        etab = db.get_etablissement(user["etablissement_id"])
+        if not db.etablissement_actif(user["etablissement_id"]):
+            _afficher_ecran_abonnement_inactif(user, etab)
+            st.stop()
+
+    return user
 
 
 def afficher_sidebar(user):
-    """Affiche le compte connecté, le changement de mot de passe, les paramètres
-    et (pour les admins) la gestion des comptes utilisateurs. À appeler sur
-    chaque page, après garantir_authentification()."""
+    """Affiche le compte connecté, le changement de mot de passe, et (pour les
+    admins d'établissement) les paramètres et la gestion des comptes de leur hôtel."""
     with st.sidebar:
-        st.markdown(f"👤 Connecté : **{user['username']}** ({user['role']})")
+        st.image("assets/logo.png", width=70)
+
+        if user["role"] == "super_admin":
+            st.markdown(f"👤 Connecté : **{user['username']}** (super-admin plateforme)")
+        else:
+            etab = db.get_etablissement(user["etablissement_id"])
+            nom_etab = etab["nom"] if etab else "—"
+            st.markdown(f"🏨 **{nom_etab}**")
+            st.markdown(f"👤 Connecté : **{user['username']}** ({user['role']})")
+
         if st.button("🚪 Se déconnecter"):
             st.session_state.auth_user = None
             st.rerun()
@@ -103,15 +138,15 @@ def afficher_sidebar(user):
                     st.success("Mot de passe mis à jour.")
 
         if user["role"] == "admin":
+            etab_id = user["etablissement_id"]
+
             with st.expander("⚙️ Paramètres de l'établissement"):
-                nom_actuel = db.get_parametre("nom_etablissement", "Swanky Apartments")
-                taux_actuel = float(db.get_parametre("taux_tva", db.TAUX_TVA_DEFAUT))
-                nouveau_nom = st.text_input("Nom de l'établissement", value=nom_actuel, key="param_nom")
+                etab = db.get_etablissement(etab_id)
+                nouveau_nom = st.text_input("Nom de l'établissement", value=etab["nom"], key="param_nom")
                 nouveau_taux = st.number_input("Taux de TVA (%)", min_value=0.0, max_value=100.0,
-                                                value=taux_actuel, step=0.25, key="param_taux")
+                                                value=float(etab["taux_tva"]), step=0.25, key="param_taux")
                 if st.button("💾 Enregistrer les paramètres"):
-                    db.set_parametre("nom_etablissement", nouveau_nom)
-                    db.set_parametre("taux_tva", nouveau_taux)
+                    db.maj_parametres_etablissement(etab_id, nom=nouveau_nom, taux_tva=nouveau_taux)
                     st.success("Paramètres enregistrés.")
                     st.rerun()
 
@@ -128,13 +163,13 @@ def afficher_sidebar(user):
                     elif db.username_existe(new_username):
                         st.warning("Ce nom d'utilisateur existe déjà.")
                     else:
-                        db.creer_utilisateur(new_username, new_password, role=new_role)
+                        db.creer_utilisateur(new_username, new_password, role=new_role, etablissement_id=etab_id)
                         st.success(f"Compte {new_username} créé.")
                         st.rerun()
 
                 st.markdown("---")
                 st.markdown("**Comptes existants**")
-                for u in db.lister_utilisateurs():
+                for u in db.lister_utilisateurs(etab_id):
                     colu1, colu2 = st.columns([2, 1])
                     statut = "🟢 Actif" if u["actif"] else "🔴 Désactivé"
                     colu1.write(f"**{u['username']}**  \n{u['role']} — {statut}")
